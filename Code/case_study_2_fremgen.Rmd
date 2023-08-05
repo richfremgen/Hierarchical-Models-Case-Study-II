@@ -1,0 +1,664 @@
+---
+title: 'STA 610 Case Study 2'
+author: "Richard Fremgen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+fontsize: 11pt
+geometry: margin = 0.60 in
+---
+
+```{r setup, message=F, warning=F, echo=F}
+library(brms)
+library(tidybayes)
+library(tidyverse)
+require(magrittr)
+require(plyr)
+library(knitr)
+library(ggpubr)
+ggplot2::theme_set(ggplot2::theme_bw())
+knitr::opts_chunk$set(fig.align = 'center')
+```
+
+***
+
+```{r, echo=FALSE}
+# Import data
+census <- read.table("Census2010_long.txt", header = TRUE)
+colnames(census) <- c("c_county", "c_age", "c_gender", "c_hispanic", "c_race",
+                      "c_freq", "c_county_pop")
+voter <- read.table("voter_stats_20161108.txt", header = TRUE) 
+
+# Pick 30 Random counties
+set.seed(896)
+unique_county <- unique(voter$county_desc)
+county_selection <- sample(unique_county, size = 30, replace = FALSE)
+
+# Filter Data Sets
+census_filtered <- census %>% filter(c_county %in% county_selection)
+voter_filtered <- voter %>% filter(county_desc %in% county_selection) %>%
+  select(-c(election_date, stats_type))
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+
+# Clean Voter Data Set -- Remove unknown columns that do not match census data set
+voter_clean <- voter_filtered %>%
+  filter(sex_code != "U") %>%
+  filter(race_code != "U") %>%
+  filter(race_code != "") %>%
+  mutate(party_cd = ifelse(party_cd == "LIB", "UNA", party_cd))
+
+# Group by and summarize the voters data frame 
+voter_clean <- voter_clean %>%
+  dplyr::group_by(county_desc, party_cd, race_code, ethnic_code, sex_code, age) %>%
+  dplyr::summarise(total_voters = sum(total_voters)) 
+
+# Impute values for ethnic_code = UL
+df_vote <- voter_clean %>%
+  pivot_wider(names_from = ethnic_code, values_from = total_voters)
+df_vote[is.na(df_vote)] <- 0
+df_vote <- df_vote %>%
+  mutate(NL2 = round((NL * UN) / (NL+HL)),
+         HL2 = UN - NL2) 
+df_vote <- na.omit(df_vote)
+df_vote2 <- df_vote %>% select(-c(UN)) %>%
+  pivot_longer(cols =  c('NL', 'HL', 'NL2', 'HL2'),
+               names_to = 'ethnic_code',
+               values_to = 'total_voters') %>%
+  filter(total_voters != 0) %>%
+  mutate(ethnic_code = case_when(
+     ethnic_code == "NL" | ethnic_code == "NL2" ~ "NL",
+     ethnic_code == "HL" | ethnic_code == "HL2" ~ "HL")) %>%
+  dplyr::group_by(county_desc, party_cd, race_code, ethnic_code, sex_code, age) %>%
+  dplyr::summarise(total_voters = sum(total_voters)) 
+ 
+# 
+# # Group by and summarize the census data frame
+census_filtered2 <- census_filtered %>%
+  dplyr::group_by(c_county, c_age, c_gender, c_race, c_hispanic) %>%
+  dplyr::summarise(census_total = sum(c_freq)) %>%
+  ungroup()
+# 
+# # Clean Census Data Set
+census_filtered3 <- census_filtered2  %>%
+  mutate(sex_code = ifelse(census_filtered2$c_gender == "Male", "M", "F"),
+         age = case_when(
+           c_age == "18-25" ~ "Age 18 - 25",
+           c_age == "26-40" ~ "Age 26 - 40",
+           c_age == "41-65" ~ "Age 41 - 65",
+           c_age == "66+"   ~ "Age Over 66"),
+         ethnic_code = case_when(
+           c_hispanic == "Hispanic" ~ "HL",
+           c_hispanic == "NotHispanic" ~ "NL"), 
+         race_code = case_when(
+           c_race == "WhiteAlone" ~ "W",
+           c_race == "BlackAlone" ~ "B",
+           c_race =="AsianAlone" ~ "A",
+           c_race == "SomeOtherRaceAlone" ~ "O",
+           c_race == "AmericanIndianOrAlaskaNativeAlone" ~ "I",
+           c_race == "TwoOrMoreRaces"  ~ "M",
+           c_race == "NativeHawaiianOrOtherPacificIslanderAlone" ~ "DELETE"
+         ))
+
+census_clean <- census_filtered3 %>%
+  dplyr::filter(race_code != "DELETE") %>%
+  dplyr::select(c_county, sex_code, age, race_code, ethnic_code, census_total)
+colnames(census_clean)[1] <- 'county_desc'
+
+# # # Join two data frames together
+df <- df_vote2  %>% dplyr::left_join(census_clean, by = c('county_desc',
+                                                            'age',
+                                                            'race_code',
+                                                            'sex_code',
+                                                         'ethnic_code'))
+```
+
+```{r, echo=FALSE}
+# below_df <- df %>% 
+#   filter(total_voters <= census_total) %>%
+#   mutate(total_census = round(census_total * 1.057)) %>%
+#   select(-c(census_total))
+# 
+# above_df <- df %>%
+#   filter(total_voters > census_total) %>%
+#   filter(census_total != 0) %>%
+#   mutate(total_census = round(census_total * 1.25)) %>%
+#   select(-c(census_total)) %>%
+#   filter(total_voters <= total_census)
+# 
+# df_clean <- rbind(below_df, above_df)
+```
+
+*Note: attached to my submittal is cs2_model.Rmd file that contains code for all of the different models fit, along with case_study_2_fremgen.Rmd which contains the code and text used to compile this pdf report.*
+
+## 1. Introduction 
+
+One of the most prominent ways that individuals in the United States (U.S.) can have their voices heard are through elections, where people vote on local, state, and federal leadership. A primary requirement for one to be able to vote is that a person must register to vote, which can be done through a variety of ways, such as via the DMV, online, or through mail-in applications. Each state in the U.S. has some form of board of elections agency that oversees and administers this election process; elections in North Carolina for example are run by the NCSBE. Besides tracking election results, NCSBE also keeps record of every individual that is registered to vote, in addition to demographic (age, race, ethnicity, gender) data. While NCSBE provides excellent data about *who* registers to vote, if one wants to understand demographics on a population level, the U.S. census is an ideal place to look. In the U.S., a population census is taken every ten years to collect and record information about members of the U.S. population; such data is then used to better understand how funds and assistance are distributed, in addition to understanding the demographic groups that make up the United States. With that in mind, the objective of this case study is to investigate how different demographic groups registered to vote in North Carolina. In particular we are interested in using a Bayesian hierarchical model to address differences in voter registration for the 2016 election between sex, age groups, race, ethnicity, county, and political party affiliation in the counties across North Carolina.  
+
+## 2. Data Handling 
+
+In order to answer these questions concerning the relationship between demographic groups and voter registration, two data set were used: `voter_stats_20161108.txt` (referred to as the *voter* data set) and `Census2010_long.txt` (referred to as the *census* data set). The *voter* data set contains information from NCSBE about the aggregate count of registered votes by the demographic groups for each county in North Carolina (NC) for the 2016 election. The `total_voters` variable in this data set contains the total number of registered voters within a particular group, as the data are aggregated both by location (county, precinct, voting districts), in addition to by demographic groups such as: age, race, ethnicity, sex, and political party. The *census* data set contains the Census Bureau's demographic report of the state of North Carolina from the 2010 U.S. Census. The `Freq` variable in this data set represents how many people were recorded for a given location (NC county) and demographic group (age, gender, hispanic, race) combination.
+
+Due to the complexity of the data, extensive data cleaning and data wrangling was conducted in order to make the data conducive for joining and analysis. One of the first steps taken was to reduce the size of the overall data set, $6.9$ million registered voters, into a subset that was more manageable and convenient to run analysis on. As such, the decision was made to randomly select thirty counties in NC and then use this subset for the entirety of the report. Simple random sampling was applied via R's built-in `sample()` function to randomly select the thirty NC counties in `Table 1`. Both data sets were filtered to only these counties of interest before further data pre-processing occurred. 
+
+```{r, echo = FALSE, message=FALSE}
+# List out counties 
+sorted_counties <- sort(county_selection)
+first_row <-  sorted_counties[1:6]
+second_row <-  sorted_counties[7:12]
+third_row <-  sorted_counties[13:18]
+fourth_row <- sorted_counties[19:24]
+fifth_row <- sorted_counties[25:30]
+as.data.frame(rbind(first_row, second_row, third_row, fourth_row, fifth_row)) %>%
+  kable(align = "c", col.names = NULL, row.names = FALSE, 
+        caption = "30 Counties Randomly Selected")
+```
+
+Next, steps were taken to further aggregate the *voter* data set to be on the same level as the *census* data. Unlike the *census* data that was recorded on the demographic-county level, the *voter* data set contains demographic registration values for each precinct, which comprise voting districts, which in turn roll-up to the one hundred counties in NC. As such, in order to make the data sets be on comparable geographic levels, the *voter* data set was aggregated to be on the demographic-county level, meaning that the precinct and voting districts were combined to be on the county level. Next, demographic groupings in the *census* data were modified in order to match the similar pairing of such group in the *voter* data set. For example, the *census* `age` variable grouping level `18-25` was changed to `Age 18 - 25` in order to match such level in the *voter* data set. Such a process was conducted on the age, gender, ethnicity, and race variables in the *census* data set as well, however, there were demographic group levels that existed in one data set, but did not exist in the other. For example the `sex_code` variable in the *voter* data set contains three unique genders: `F`, `M`, and `U`, where as the *census* column `gender` only contained two unique genders: `Female` and `Male`. In such a context, handling the gender of `U` presented challenges since there was not a `U` or unknown gender in the *census* data set. A similar situation also presented itself with the `race_code` variable where `race_code = U` only existed in one data set. As such, the decision was made to filter out rows where `sex_code = U` or `race_code = U`, since these instances were very infrequent ($<2 \%$ of the data). 
+
+The one problematic variable in the *voter* data set was `ethnic_code` which took on the values of `UN`, `NL`, and `HL` and encoded the Hispanic origin of a group. While this variable mapped to the `Hispanic` variable the *census* data set, the *census* data set only took on values of `Hispanic` and `NotHispanic`, meaning that `ethnic_code = UN` would cause problems when joining. Such occurrences could not simply be removed from the data, since `ethnic_code = UN` represented $16\%$ of the number of registered voters. In order to cope with this issue, `ethnic_code = UN` was treated as missing completely at random (MCAR) data; where we assumed that the MCAR data would have the same distribution of the non-missing data . In order to impute these values in the *voter* data set, first the proportion of `NL` and `HL` groups was found for each county-party-race-sex-age combination of voters. Next, these proportions were then used to properly divide `ethnic_code = UN` data into `NL` and `HL` groups for the given demographic. The decision was made to calculate `NL:HL` proportions on such a granular demographic subgroup level, because *a priori* is it reasonable to think that different counties and demographic groups in NC have varying proportions of Hispanic to Non-Hispanic voters. 
+
+The final variable that was modified in the *voter* data set was `party_cd` which corresponds to the political party that a given individual registered to. Since `party_cd = LIB` made up only $0.4 \%$ of the registered voters,  `LIB` party occurrences were grouped with the `UNA` party in order to represent the *Unaffiliated* party grouping. Next, these filtered data sets were then joined together based on the county, age, race, sex, and ethnicity variables. The resulting data set contained both the number of people that were registered to vote and the number of people accounted for during the census for each demographic group, as such values could be seen as binomally distributed and provided motivation for the type of models used. The one issue with this binomial assumption was that when the data was joined, there were certain demographic subgroups that had a greater number of registered voters than people recorded in the census. Such a finding is not entirely surprising, given that the voter registration data was taken six years after the census data, and generally speaking populations in the U.S. tend to grow each year. In order to cope with this issue, a naive approach was taken to uniformly increase each census value by $5.7 \%$; this number was used since North Carolina's population grew by $9.5 \%$ between the 2010 and 2020 census and corresponds to a scaled value for the six year gap, if we naively assume that the population grew at a constant rate each year.  
+
+```{r, echo=FALSE, message=FALSE}
+m1_df <- df %>% dplyr::group_by(county_desc, race_code, ethnic_code, sex_code, age) %>%
+              dplyr::summarise(num_voters = sum(total_voters),
+                               num_census = mean(census_total)) %>%
+  ungroup()
+
+below_df <- m1_df %>%
+  filter(num_voters <= num_census) %>%
+  mutate(total_census = round(num_census * 1.057)) %>%
+  select(-c(num_census))
+
+above_df <- m1_df %>%
+  filter(num_voters > num_census) %>%
+  filter(num_census != 0) %>%
+  mutate(total_census = round(num_census * 1.25)) %>%
+  select(-c(num_census)) %>%
+  filter(num_voters <= total_census)
+
+df_clean <- rbind(below_df, above_df) 
+```
+
+## 3. Exploratory Data Analysis (EDA)
+
+One of the most important steps to take after the data has been processed, is to conduct EDA in order to investigate which variables could be used as potential covariates in the models fit. *A priori* it is feasible to think that the number of registered voters will differ between demographic sub-groups, but since each demographic makes up a different amount of the population, each group's voter registration totals were converted to a proportion out of how many total people there were recorded in the census for that group. To start, we consider how voter `sex_code` (male vs. female)  registration rates varied by both `age`and `race_code`. Looking at the bar plots below, we can see that overall, registration rates tend to generally increase as age group increase for both `sex_code`, `M` and `F`, as females had slightly higher registration rates for three out of the four age groups. If one were to look just at `sex_code` registration differences (Appendix), it would be evident that females had a registration rate of $81 \%$ compared to $76 \%$ for males. Additionally, when just considering registration rates on just an `age` level, pooling both sexes together (Appendix), `age = Over 66`, had the highest registration rate of $88 \%$, where as the youngest age group, `age = 18 - 25`, had the lowest at $70 \%$. Aside from age group, we can also consider how `sex_code` registration rates vary by `race_code`, where we can observe much more variability between races. Looking at the output below, `race_code = B` (Black) and `race_code = W` (White) had much higher registration rates $> 75 \%$ for both sexes when compared to the other four races. 
+
+```{r, echo=FALSE, message=FALSE, out.width="65%"}
+p1 <- df_clean %>%
+  dplyr::group_by(age, sex_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = num_registered / num_census) %>%
+  mutate(age = str_remove(age, "Age")) %>%
+ggplot(aes(fill=sex_code, y=prop, x=age)) +
+    geom_bar(position="dodge", stat="identity") +
+  ylim(0,1) +
+  labs(x = "Age Group", y = "Reg. Proportion",
+       title = "Age Group Voter Registration",
+       subtitle = "By Sex", fill = "Sex Code") +
+   theme(plot.title = element_text(hjust = 0.5, size = 11, face= "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10, face= "italic"))
+
+p2 <- df_clean %>%
+  dplyr::group_by(race_code, sex_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = num_registered / num_census) %>%
+ggplot(aes(fill=sex_code, y=prop, x=race_code)) +
+    geom_bar(position="dodge", stat="identity") +
+  ylim(0,1) +
+  labs(x = "Race Code", y = "Reg. Proportion",
+       title = "Race Code Voter Registration",
+       subtitle = "By Sex", fill = "Sex Code") +
+   theme(plot.title = element_text(hjust = 0.5, size = 11, face= "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10, face= "italic"))
+
+p3 <- df_clean %>%
+  dplyr::group_by(age, ethnic_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = num_registered / num_census) %>%
+  mutate(age = str_remove(age, "Age")) %>%
+ggplot(aes(fill=ethnic_code, y=prop, x=age)) +
+    geom_bar(position="dodge", stat="identity") +
+  ylim(0,1) +
+  labs(x = "Age Group", y = "Reg. Proportion",
+       title = "Age Group Voter Registration",
+       subtitle = "By Ethnic Code", fill = "Ethnic Code") +
+   theme(plot.title = element_text(hjust = 0.5, size = 11, face= "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10, face= "italic")) +
+  scale_fill_brewer(palette="Accent")
+
+p4 <- df_clean %>%
+  dplyr::group_by(race_code, ethnic_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = num_registered / num_census) %>%
+ggplot(aes(fill=ethnic_code, y=prop, x=race_code)) +
+    geom_bar(position="dodge", stat="identity") +
+  ylim(0,1) +
+  labs(x = "Race Code", y = "Reg. Proportion",
+       title = "Race Code Voter Registration",
+       subtitle = "By Ethnic Code", fill = "Ethnic Code") +
+   theme(plot.title = element_text(hjust = 0.5, size = 11, face= "bold"),
+         plot.subtitle = element_text(hjust = 0.5, size = 10, face= "italic")) +
+  scale_fill_brewer(palette="Accent") 
+```
+
+```{r, echo=FALSE, message=FALSE, fig.align='center', fig.height=3, fig.width=10}
+ggarrange(p1, p2,legend = "bottom", common.legend = TRUE)
+```
+
+Another variable of interest is `ethnic_code` which can take on two possible values: `HL` (Hispanic) and `NL` (Non-Hispanic); as such we can reproduce the same plots above but segmenting by `ethnic code`. Clearly, Non-Hispanic groups had much higher voting registration rates compared to Hispanic individuals across age groups, as the differences between the two are very similar for every one of the four age groups. When segmenting `ethnic_code` by `race_code`, the difference between `NL` and `HL` ethnic groups becomes more variable, as for most races `NL` had higher registration rates than `HL`, however there were race codes such as `A` (Asian) and `M` (Multiple) where `HL` had higher or the same rates. It should be noted that while the differences between ethnicity looks to be extensive, the `HL` individuals only make up $1.5 \%$ of the data, even after imputing the MCAR data. 
+
+```{r, echo=FALSE, message=FALSE, fig.align='center', fig.height=3, fig.width=10}
+ggarrange(p3,p4, legend = "bottom", common.legend = TRUE)
+```
+
+When we consider the different counties selected, *a priori* is it reasonable to think that out of all the demographic groups selected, `race_code` would be the one to vary the most by geographic location (county), when compared to other variables such as `age` or `sex_code`. With that being said, the tiles in the heat map below correspond to the voter registration proportion for every `county` and `race_code` combination, as abbreviated county names (first three letters) were used to make the graphic more compact. We can see in the output below, that across all thirty counties, `W` and `B` race codes had the highest voter registration rate. However, we can discern that there do appear to be differences between counties, aside from `race_code = W`, as each race code does appear to differ to some degree for each for the thirty counties. For example `race_code = O` (Other races) has some counties, where the proportion is very low (white color tile), but many counties were the voter registration population appears to be moderate to high. A similar argument can be made for `race_code = A` (Asian), where the population in Scotland county (`SCO`) is $> 80 \%$ compared to Avery county (`AVE`) where registration rate appears to be around $25 \%$. Included in the Appendix is also a table calculating registrations for each county as a whole (ignoring any additional demographic effects), as each of the thirty counties range from an overall registration rate between $70 \%$ and $88 \%$. 
+
+```{r, echo=FALSE, message=FALSE, out.width="75%"}
+# Heatmap of Age and Race Code
+df_clean %>% 
+  mutate(abb_county = abbreviate(county_desc, minlength = 3)) %>%
+  dplyr::group_by(abb_county, race_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = num_registered / num_census) %>%
+  ggplot(aes(x= abb_county, y = race_code, fill = prop)) +
+  geom_tile(color = "white",lwd = 1, linetype = 1) +
+  coord_equal() +
+  scale_fill_gradient(low = "white", high = "red") + 
+  labs(title = 'Voter Registration Rates by County-Race Code',
+       fill = "Voter Reg. Prop", y = "Race Code", x = "County (Abbreviated)") + 
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 11),
+        legend.title=element_text(size=8),
+        axis.text.x = element_text(angle = 60, vjust = 0.5, hjust=0.5),
+        axis.title = element_text(size = 9))
+```
+
+## 4. Model I 
+
+### 4.1 Model Motivation
+
+In order to answer the questions of interest in this assignment, I have decided to fit two models. This section (`Model I`) will address the fist two questions of interest about differences in voter registration groups among demographic groups and between counties, and the next section (`Model II`) will address questions regarding political party affiliations and sex/age differences. Since the data we are working with is binomally distributed data, we can model such as $Y_{g} \sim Bin(n_{g}, ~p_{g})$, where $Y_g$ is the number of registered voters for a given demographic subgroup *g*. Additionally, $n_g$ represents the number of people in the population for that given demographic group (based on the census data), and $p_g$ is the probability of someone in that demographic group registered to vote. We can further model $p_g$ by using the *generic* binomial regression equation as such:  $\text{logit}(p_{g})  = \beta_0 + \beta_1x_{i1} + \cdots + \beta_px_{ip}$. The generic form of this equation will be used in subsequent sections to fit a series of multilevel model, using a Bayesian approach; the final model in `Section 4.3` will contain the specific random effects and prior distributions that utilized in the model. A multilevel model is preferred in such a scenario, since they allow for information sharing between groups of interest (e.g. between counties or the different races), and provide the framework to account for both within-in and between-in group variances. Such would not be difficult to discern the difference between if one were to just use a normal logistic binomial regression model. Additionally, by using a Bayesian approach, we are able to quantify our uncertainty in the model and induce *a priori* knowledge about parameter estimates. 
+
+### 4.2 Model Evaluation
+
+A logical first approach to address differences in registration rates is to fit fixed effects model with `brm()`, for baseline comparison. To start, binomial regression models that considered only fixed effects on `sex_code` and `county` were fit, and the results of such can be seen in in the Appendix. We can see that with the `sex_code` fixed effects model, the estimate for `sex_code = M` is $-0.30$, meaning that under this model, males are $e^{-0.3} = 0.74$ times the odds of registering to vote when compared to females; a finding that is supplemented by our EDA results that found that females had a higher probability of registering to vote across nearly every demographic. Additionally, under a fixed effect model that just uses `county` as a covariate, we can see a fair amount of variability between counties, as counties such as Clay and Currituck had some of the highest registration odds, compared to Grainville that had the lowest in comparison to the baseline. While these models are interpretable and provide a simple solution to answer the questions of interest directly, they ignore the relevance of any other potential covariates and disregard group-level differences. Moving on with our analysis, our EDA revealed that other variables in the data set such as `sex_code`, `race_code` and `ethnic_code`, could help to explain the variability in the registration data. Additionally, our EDA revealed that there may be potential group level effects that a fixed effects model cannot account for, as placing a random effect on variables suspected of having group-level differences may help to explain additional variance in the data. To test such a theory, the following models were fit using `brm()` in R. 
+
+```{r, echo=FALSE}
+model_column <- c('model a', 'model b', 'model c', 'model d')
+equation_column <- c("1 + age + sex_code + (1|county_desc)", 
+                     "1 + age + sex_code + ethnic_code + (1|county_desc)",
+                     "1 + age + sex_code + ethnic_code + race_code + (1 + sex_code|county_desc)",
+                     "1 + age + sex_code + race_code + ethnic_code + (1 + race_code|county_desc)")
+
+as.data.frame(cbind(model_column, equation_column)) %>%
+  kable(align = "c", col.names = c("Model", "Equation"), caption = "Models Tested")
+```
+
+```{r, echo = FALSE, message=FALSE}
+load("mod1.RData")
+load("mod2.RData")
+load("mod4.RData")
+load("mod6.RData")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+model_a <- add_criterion(mod1, "waic")
+model_b <- add_criterion(mod2, "waic")
+model_c <- add_criterion(mod4, "waic")
+model_d <- add_criterion(mod6, "waic")
+```
+
+Aside from conducting posterior predictive checks, another way to compare Bayesian models is to use the Wantabe-Akaike Information Criterion (WAIC) , or `waic` in the table below, where lower `waic` scores indicate a better model fit. Looking at the results below, we can see that `model_d` that placed a random intercept on `county`, a random slope on `race_code`, and fixed effects on `age`, `sex_code`, `ethnic_code`, and `race_code` was the best performing model with the smallest `waic` value. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+w <- loo_compare(model_a, model_b, model_c, model_d, criterion = "waic")
+#print(w, simplify = F)
+w %>% kable(align = "c", 
+            caption = "Comparing Model Performance")
+```
+
+### 4.3 Final Model (`Model I`)
+
+The final model (`model_d`) can be expressed mathematically as the following:
+
+$$
+\begin{aligned}
+Y_{ijklm} &\sim Bin(n_{ijklm}, ~p_{ijklm}) \\[2pt]
+\text{logit}(p_{ijklm}) &= (\beta_0 + b_{0,i}) + (\beta_1 + b_{1,j})\text{race}_j + \beta_2\text{sex}_k + \beta_3\text{age}_l + \beta_4\text{sex}_m \\[2pt] 
+(b_{0,i}~~~ b_{1,j})^\top &\sim N(\mathbf 0, \mathbf D),~~~ \mathbf D =\begin{pmatrix}
+\tau_{0} & 0 \\
+0 & \tau_{1} 
+\end{pmatrix} \mathbf W \begin{pmatrix}
+\tau_{0} & 0 \\
+0 & \tau_{1} 
+\end{pmatrix}, ~~~\mathbf W =\begin{pmatrix}
+1 & v \\
+v & 1 
+\end{pmatrix} \\[2pt]
+\end{aligned}
+$$
+In this model $Y_{ijklm}$ is the the number of registered voters for county *i*, race *j*, sex *k*, age *l*, and ethnicity *m*, and $p_{ijklm}$ is the probability of someone in that demographic class being registered to vote. Additionally we can specify the following priors: $\tau_0\sim Half~Cauchy(0,1)$, $\tau_1\sim Half~Cauchy(0,1)$, $W = \text{LKJcorr}(2)$, and $\beta_0, \beta_1, \beta_2, \beta_3, \beta_4 \sim N(0,10)$ for all fixed effects. Half Cauchy priors were used on $\tau_0, \tau_1$ since these are variance values and by using this prior, we are forcing values to be $>0$. Additionally, because *a priori* we are not that confident in the variance of the fixed effect estimators $\beta_0, \beta_1, \beta_2, \beta_3, \beta_4$, a weakly informative prior of $N(0,10)$ was used to prevent the posterior from becoming too concentrated around the prior. The LKJ prior was used for $\mathbf W$, since this prior is essentially an extension of the beta distribution and serves as a weakly information prior that is commonly used within Stan to model covariance matrices.
+
+Even though this final model had the smallest `waic` there are several checks that must be done to verify that are findings and model selection is justified. First is to verify convergence in the MCMC chains used to fit the model; trace plots (see `Appendix`) validate that our model has converged, as no local trends can be observed. It is also important to verify that placing random effects on `county` and `race_code` was appropriate. One way to visualize these random effects, is to plot the coefficient estimates, along with their $95\%$ credible interval as shown below. The `Intercept` plot illustrates the $b_{0,i}$ estimates for each of the thirty counties; each red dot (or row) corresponds to a different NC county as county names were removed to reduce clutter. Additionally, the blue dot plots correspond the the random slope estimates that our model generated for each `race_code` for all thirty counties.  
+
+```{r, echo=FALSE}
+k1 <- coef(mod6)$county_desc[, , 1] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("#A65141")) +
+  labs(title = 'Intercept') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text.x =element_text(size=9))
+
+k2 <- coef(mod6)$county_desc[, , 2] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("darkblue")) +
+  labs(title = 'Race Code = B') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text.x =element_text(size=9))
+
+k3 <- coef(mod6)$county_desc[, , 3] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("darkblue")) +
+  labs(title = 'Race Code = I') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text.x =element_text(size=9))
+
+k4 <- coef(mod6)$county_desc[, , 4] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("darkblue")) +
+  labs(title = 'Race Code = M') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text.x =element_text(size=9))
+
+k5 <- coef(mod6)$county_desc[, , 5] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("darkblue")) +
+  labs(title = 'Race Code = O') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text.x =element_text(size=9))
+
+k6 <- coef(mod6)$county_desc[, , 6] %>%
+  as_tibble() %>% 
+  mutate(param   = c(paste("Intercept", 1:30)),
+         reorder = c(30:1)) %>%
+  ggplot(aes(x = reorder(param, reorder))) +
+  geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+  geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+                  shape = 20, size = 1/4) +
+  scale_color_manual(values = c("darkblue")) +
+  labs(title = 'Race Code = W') +  
+  xlab(NULL) +
+  coord_flip() +
+  theme(legend.position = "none",
+        axis.ticks.y    = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 10),
+        axis.text.y=element_blank(),
+        axis.title=element_text(size=9),
+        axis.text =element_text(size=9))
+```
+
+```{r, echo=FALSE, out.width="60%"}
+ggarrange(k1, k2, k3, k4, k5, k6)
+```
+
+Looking at the output above, we can see there is a fair amount of variability in the parameter estimates, as county-level estimates appear to be spread throughout the graphic. In particular there are clear differences in estimates of voter registration odds across the thirty counties of interest, as there are numerous instances in the `Intercept` plot where counties and their $95\%$ credible interval do not overlap with one another. Such a finding validates our rationale for placing a random intercept on each county, meaning that there are significant differences between county registration rates, holding all else constant. On the high end, Jackson and Scotland county had the highest county estimates of $-1.48$ and $-1.54$ respectively, whereas Avery and Bertie county had the smallest county estimates at $-3.77$ and $-3.68$. An interesting difference between these two sets of counties that differ the most based on our model, is that Avery and Bertie are in the top $25 \%$ of counties by rural land percentage, and have considerable more rural land than Jackson and especially Scotland county. This leads one to infer that perhaps considering the *type* of county (rural vs. urban) can have an impact on registration rates, and could be explored in future analysis.
+
+Aside from county-level differences, we can also see an extensive amount of variability in estimates for each county across the different race codes. Instances of non-overlapping $95\%$ credible intervals in each `race_code` plot justify the decision to use a random effect on `race_code`, since there are clear group-level differences. We can see that `B` and `W` race codes generally had positive parameter estimates; while such becomes difficult to interpret because of the complexity of the model, we can say that generally speaking, holding all other variables constant, `B` and `W` race codes generally had a higher probability of registering to vote when compared to the baseline `A` race code. Additionally, we can see that according to our model the `M` race code had nearly all negative estimates across all counties, thus inferring that this race code is the least probable to register to vote holding all else constant. 
+
+Additionally, we can perform inference on the fixed effects components of the model, if we set all random effects equal to zero. Parameter estimates for the fixed effects variables are listed below, as one initial observation is that the estimates of `sex_code = M` is now $-0.22$ which translates to men being $0.80$ times the odds of registering to vote when compared to females with a $95\%$ credible interval of $(0.79, 0.81)$, holding all else constant. Similar to our EDA findings, Non-Hispanic (`ethnic_code = NL`) are predicted to be $11.8$ times the odds of registering to when compared to Hispanic individuals, with a $95\%$ credible interval of $(11.59, 12.06)$, holding all else constant. Due to page constraints, included in the `Appendix` is a similar table but for the random effects in the final `Model I`. 
+
+```{r, echo=FALSE}
+as.data.frame(summary(mod6)$fixed)  %>%
+  kable(align = "c", caption = "Final Model I Fixed Effects")
+```
+
+
+## 5. Model II
+
+### 5.1 Data Preparation
+
+As noted earlier, the objective of fitting a second model (`Model II`) was to evaluate differences in registration rates better age groups and sexes when considering different political party affiliations. The decision was made to fit separate models (`Model I` and `Model II`), since the data had to be aggregated slightly different to answer both sets of questions of interest for the modeling scheme devised. Since only the voters data set contained political party data, political party population values had to be imputed into the census data set in order to use the binomial regression approach described in Section 4.1. In order to impute these values for the Democratic (`DEM`), Republican (`REP`), and Unaffiliated (`UNA`) parties, the sum of the number of registered voters for the two opposite parties, was subtracted from the total census number for that particular subgroup. For example, $n_{DEM_g}$, the *theoretical* census number for demographic group *g* that are Democrats was computed by $n_{DEM_g} = n_{total_g} - (Y_{REP_g} + Y_{UNA_g})$, where $n_{total_g}$ is the total census figure for group *g*, $Y_{REP_g}$ is the number of Republican registered voters for group *g*, and $Y_{UNA_g}$ is the number of Unaffiliated registered voters for group *g*. The same methodology was used to similarly to calculate $n_{REP_g}$ and $n_{UNA_g}$. Once we had these values, we could now carry out a similar analysis as we did for `Model I`, using the notations that $Y_{DEM_g} \sim Bin(n_{DEM_g},~p_{DEM_g})$, $Y_{REP_g} \sim Bin(n_{REP_g},~p_{REP_g})$, and $Y_{UNA_g} \sim Bin(n_{UNA_g},~p_{UNA_g})$, where *g* represented an abbreviated notation for a given demographic subgroup *ijklm*. Next, the same multilevel model described in was fit for each political party as outlined in Section 4.3, where a random intercept was placed on county, a random slope on race code, followed by fixed effects on the remaining age, race, sex code, and ethnicity covariates. Additionally the same prior scheme was used from earlier with an Half Cauchy prior on the variance values to force them to be positive, relatively weakly information Normal(0,10) priors on the fixed effects, followed by the LKJ(2) prior on the covariance matrix. Three separate, but identical models were fit, one for each political party, as the only difference was that the data source was filtered to only include entries for that particular political party of interest. 
+
+```{r, echo=FALSE}
+new_df <- df %>% 
+  pivot_wider(names_from = party_cd, values_from = total_voters)
+
+new_df[is.na(new_df)] <- 0
+new_df2 <- new_df %>%
+  mutate(new_voter = DEM + REP + UNA) 
+
+below_df2 <- new_df2 %>%
+  filter(new_voter <= census_total) %>%
+  mutate(total_census = round(census_total * 1.057)) %>%
+  select(-c(census_total))
+
+above_df2 <- new_df2 %>%
+  filter(new_voter > census_total) %>%
+  filter(census_total != 0) %>%
+  mutate(total_census = round(census_total * 1.25)) %>%
+  select(-c(census_total)) %>%
+  filter(new_voter <= total_census)
+
+df_clean2 <- rbind(below_df2, above_df2) %>%
+  select(-c(new_voter))
+
+df_pol <- df_clean2 %>%
+  mutate(n_dem = total_census - (REP + UNA),
+         n_rep = total_census - (DEM + UNA),
+         n_una = total_census - (REP + DEM)) %>%
+  select(-c(total_census))
+
+df_dem <- df_pol %>% select(-c(REP, UNA, n_rep, n_una))
+df_rep <- df_pol %>% select(-c(DEM, UNA, n_dem, n_una))
+df_una <- df_pol %>% select(-c(DEM, REP, n_dem, n_rep))
+```
+
+```{r, echo = FALSE, message=FALSE}
+load("mod_dem.RData")
+load("mod_rep.RData")
+load("mod_una.RData")
+
+pp1 <- as.data.frame(summary(mod_dem)$fixed)[1] 
+pp2 <- as.data.frame(summary(mod_rep)$fixed)[1] 
+pp3 <- as.data.frame(summary(mod_una)$fixed)[1] 
+```
+
+### 5.2 Final Models (`Model II`)
+
+The table below represents the fixed effect estimates for the three different binomial regression models fit for each political party. Variable names were shortened to save space so that `Male` is the `sex_code` variable, and (`B`, `I`, `M`, `O`, `W`) are the different categories of `race_code`. Looking at the output below, we can that compared to the baseline age group to `18-25`, voter registration probabilities tended to increase as one got older for both Democrats and Republicans, holding all else constant. Such can be seen below, where Republicans over the age of 65 were 3.06 times, with a 95% credible interval of (3, 3.12) to register to vote compared to the youngest age group of 18-25. Additionally, for Democrats, individuals over the age of 65 were 5.7 times, with a 95% credible interval of (5.58, 5.75) as likely to vote compared to 18-25 year old Democrats. Such a finding supported our EDA analysis, which revealed that voter participation increased as age increased. Interestingly enough, the Unaffiliated party group had mixed results as Unaffiliated individuals age 65 and over were only 1.19 times as likely to registered to vote when compared to the 18-25 age group population, as the 26-40 age group for the party actually had the highest odds of registering. Such a result is not entirely shocking, since the Unaffiliated political party is essentially made of up individuals who are undecided about whether they lean more conservative or liberal on certain issues, as it could be expected for this level indecisiveness to decrease as one grew in age.
+
+Differences between males and females provided mixed results as well. The odds of a Democrat male registering to vote was only 0.66 times, with a 95% credible interval of (0.65, 0.67), the odds of a Democrat female. For Republicans, this sex code difference was almost non-existent as males were 0.95 times, with a 95% credible interval of (0.94, 0.96) of registering to vote when compared to females. Perhaps the most surprising results observed when separate models were fit for each political party was the vast differences in race groups. For example, the `B` race code estimate for the Democrat model was 2.79, which equates to a staggering 16.3 times as likely to register to vote when compared to the baseline race group for this political party. On the contrast, the model estimate for `B` race code that are Republicans is -0.27, which means that Black Republicans are only 0.75 as times as likely to vote compared to the baseline race, holding all else constant. Additionally, we can see that the estimates for the Democrat and Unaffiliated party models were very similar for the `W` race code, whereas white Republican voters had a significantly higher estimate and thus higher odds of registering the vote. Finally, when considering ethnicity, Non-Hispanic voters were more likely to register compared to Hispanic voters; The full fixed effects parameter estimate tables for these three models can be found in the Appendix of this report.
+
+```{r, echo=FALSE}
+pp4 <- cbind(pp1, pp2, pp3)
+colnames(pp4) <- c("DEM", "REP", "UNA")
+
+pp5 <- as.data.frame(round(t(pp4),2))
+pp6 <- tibble::rownames_to_column(pp5 , "Party")
+colnames(pp6) <- c('Party', 'Int.', '26-40', '41-65', '>65', 'Male', 'B', 'I', 'M', 'O', 'W', 'NL')
+
+pp6 %>%
+  kable(align='c', caption = 'Model II Fixed Effect Estimates')
+```
+
+
+## 6. Conclusion and Model Limitations:
+
+In this study, we explored differences in demographic subgroup voter registration rates for thirty randomly selected NC counties. In `Model I`, we observed clear across-county differences that females were more likely to vote than males, along with differences in rates between the counties selected. `Model II` was constructed to address questions regarding differences when considering different political party affiliation. As such, our results in `Model II` illustrated that both `sex_code` and `race_code` registration odds differed depending on whether one was a Democrat or Republican, while `age` group differences were generally the same for these parties. There are several limitations of the model that must be addressed; one of which has to do with how the data was collected, since there were numerous instances where different subgroups existed in one data set, but not the other. This resulted in some data (albeit very small amounts) having to be dropped from the final data set or imputed by assuming *MCAR*. Moving forward a better approach would to either improve the collection methods of both data sets so the same demographic exist in both surveys, or to assume *MNAR* and to use a more improved data imputation method to reduce the uncertainty in the data. Additionally, using data sets that differed by six years also limits our inferences, as perhaps future analysis should try to use data collected closer in time. Another limitation of the model was that simple random sampling was used to select the counties of interest. Perhaps further analysis could place more importance of using a sampling scheme such as stratified sampling, so that the counties selected are representative of the results from the state of North Carolina. 
+
+\newpage
+
+## 7 Appendix 
+
+**Note: this section of the case study is not to be included in the 8 page requirement and is used to portray supplemental material. Attached to this Sakai submittal is also the .Rmd that was used to generate this document along with all supporting code**
+
+### 7.1 EDA Supplemental Material
+
+```{r, echo=FALSE}
+# Sex Code 
+df_clean %>%
+  dplyr::group_by(sex_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = round(num_registered / num_census,4)) %>%
+  kable(align = "c", caption = "Sex Code Voter Registration Proportions",
+        col.names = c("Sex Code", "Registration Number", "Census Number", "Proportion"))
+
+# Race Code 
+df_clean %>%
+  dplyr::group_by(race_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = round(num_registered / num_census,4)) %>%
+  kable(align = "c", caption = "Race Code Voter Registration Proportions",
+        col.names = c("Race Code", "Registration Number", "Census Number", "Proportion"))
+
+# Age
+df_clean %>%
+  dplyr::group_by(age) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = round(num_registered / num_census,4)) %>%
+  kable(align = "c", caption = "Age Group Voter Registration Proportions",
+        col.names = c("Age Group", "Registration Number", "Census Number", "Proportion"))
+
+# Ethnic Code
+df_clean %>%
+  dplyr::group_by(ethnic_code) %>%
+  dplyr::summarise(num_registered = sum(num_voters),
+                   num_census = sum(total_census),
+                   prop = round(num_registered / num_census,4)) %>%
+  kable(align = "c", caption = "Ethnic Code Voter Registration Proportions",
+        col.names = c("Ethnic Code", "Registration Number", "Census Number", "Proportion"))
+``` 
+
+### 7.2 Model I - Fixed Effects Model Supplemental Material
+
+Fixed Effect Model on `sex_code`:
+
+```{r, echo = FALSE, message=FALSE}
+load("mod7.RData")
+```
+
+```{r, echo = FALSE, message=FALSE}
+round(summary(mod7)$fixed, 4) %>%
+  kable(align = "c", caption = "Fixed Effects Model on Sex")
+```
+
+Fixed Effect Model on `county`:
+
+```{r, echo = FALSE, message=FALSE}
+load("mod9.RData")
+```
+
+```{r, echo = FALSE, message=FALSE}
+round(summary(mod9)$fixed, 4) %>%
+  kable(align = "c", caption = "Fixed Effects Model on County")
+```
+
+### 7.2 Model I - Final Mixed Effects Model Supplemental Material
+
+Final Model County Estimates:
+
+```{r, echo=FALSE}
+as.data.frame(coef(mod6)$county_desc[, , 1]) %>%
+    kable(align = "c", caption = "Final Model I County Estimates", digits = 4)
+```
+
+Final Model Random Effects:
+
+```{r, echo=FALSE}
+as.data.frame(summary(mod6)$random)  %>%
+  kable(align = "c", caption = "Final Model I Random Effects", digits = 4,
+        col.names = c("Est", "Error", "95 CI L", "95% CI U", "Rhat", "ESS", "Tail ESS"))
+```
+
+Final Model Trace Plots:
+
+```{r, echo=FALSE}
+plot(mod6, N = 4)
+```
+
+### 7.3 Model II - Final Mixed Effects Model Supplemental Material
+
+Final Political Party Models Fixed Effects Full Tables:
+
+```{r, echo=FALSE}
+as.data.frame(summary(mod_dem)$fixed) %>%
+  kable(align = "c", caption = "Model II DEM Fixed Effects")
+as.data.frame(summary(mod_rep)$fixed) %>%
+  kable(align = "c", caption = "Model II REP Fixed Effects")
+as.data.frame(summary(mod_una)$fixed) %>%
+  kable(align = "c", caption = "Model II UNA Fixed Effects")
+```
+
+***
+

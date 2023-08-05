@@ -1,0 +1,396 @@
+---
+title: 'STA 610 Case Study Model'
+author: "Richard Fremgen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+fontsize: 11pt
+geometry: margin = 0.60 in
+---
+
+```{r setup, message=F, warning=F, echo=F}
+library(tidyverse)
+require(magrittr)
+require(plyr)
+library(knitr)
+library(ggpubr)
+library(brms)
+library(tidybayes)
+ggplot2::theme_set(ggplot2::theme_bw())
+knitr::opts_chunk$set(fig.align = 'center')
+```
+
+***
+
+```{r, echo=FALSE}
+# Import data
+census <- read.table("Census2010_long.txt", header = TRUE)
+colnames(census) <- c("c_county", "c_age", "c_gender", "c_hispanic", "c_race",
+                      "c_freq", "c_county_pop")
+voter <- read.table("voter_stats_20161108.txt", header = TRUE) 
+
+# Pick 30 Random counties
+set.seed(896)
+unique_county <- unique(voter$county_desc)
+county_selection <- sample(unique_county, size = 30, replace = FALSE)
+
+# Filter Data Sets
+census_filtered <- census %>% filter(c_county %in% county_selection)
+voter_filtered <- voter %>% filter(county_desc %in% county_selection) %>%
+  select(-c(election_date, stats_type))
+```
+
+```{r, echo=FALSE, message=FALSE}
+
+# Clean Voter Data Set -- Remove unknown columns that do not match census data set
+voter_clean <- voter_filtered %>%
+  filter(sex_code != "U") %>%
+  filter(race_code != "U") %>%
+  filter(race_code != "") %>%
+  mutate(party_cd = ifelse(party_cd == "LIB", "UNA", party_cd))
+
+# Group by and summarize the voters data frame 
+voter_clean <- voter_clean %>%
+  dplyr::group_by(county_desc, party_cd, race_code, ethnic_code, sex_code, age) %>%
+  dplyr::summarise(total_voters = sum(total_voters)) 
+
+# Impute values for ethnic_code = UL
+df_vote <- voter_clean %>%
+  pivot_wider(names_from = ethnic_code, values_from = total_voters)
+df_vote[is.na(df_vote)] <- 0
+df_vote <- df_vote %>%
+  mutate(NL2 = round((NL * UN) / (NL+HL)),
+         HL2 = UN - NL2) 
+df_vote <- na.omit(df_vote)
+df_vote2 <- df_vote %>% select(-c(UN)) %>%
+  pivot_longer(cols =  c('NL', 'HL', 'NL2', 'HL2'),
+               names_to = 'ethnic_code',
+               values_to = 'total_voters') %>%
+  filter(total_voters != 0) %>%
+  mutate(ethnic_code = case_when(
+     ethnic_code == "NL" | ethnic_code == "NL2" ~ "NL",
+     ethnic_code == "HL" | ethnic_code == "HL2" ~ "HL")) %>%
+  dplyr::group_by(county_desc, party_cd, race_code, ethnic_code, sex_code, age) %>%
+  dplyr::summarise(total_voters = sum(total_voters)) 
+ 
+# 
+# # Group by and summarize the census data frame
+census_filtered2 <- census_filtered %>%
+  dplyr::group_by(c_county, c_age, c_gender, c_race, c_hispanic) %>%
+  dplyr::summarise(census_total = sum(c_freq)) %>%
+  ungroup()
+# 
+# # Clean Census Data Set
+census_filtered3 <- census_filtered2  %>%
+  mutate(sex_code = ifelse(census_filtered2$c_gender == "Male", "M", "F"),
+         age = case_when(
+           c_age == "18-25" ~ "Age 18 - 25",
+           c_age == "26-40" ~ "Age 26 - 40",
+           c_age == "41-65" ~ "Age 41 - 65",
+           c_age == "66+"   ~ "Age Over 66"),
+         ethnic_code = case_when(
+           c_hispanic == "Hispanic" ~ "HL",
+           c_hispanic == "NotHispanic" ~ "NL"), 
+         race_code = case_when(
+           c_race == "WhiteAlone" ~ "W",
+           c_race == "BlackAlone" ~ "B",
+           c_race =="AsianAlone" ~ "A",
+           c_race == "SomeOtherRaceAlone" ~ "O",
+           c_race == "AmericanIndianOrAlaskaNativeAlone" ~ "I",
+           c_race == "TwoOrMoreRaces"  ~ "M",
+           c_race == "NativeHawaiianOrOtherPacificIslanderAlone" ~ "DELETE"
+         ))
+
+census_clean <- census_filtered3 %>%
+  dplyr::filter(race_code != "DELETE") %>%
+  dplyr::select(c_county, sex_code, age, race_code, ethnic_code, census_total)
+colnames(census_clean)[1] <- 'county_desc'
+
+# # # Join two data frames together
+df <- df_vote2  %>% dplyr::left_join(census_clean, by = c('county_desc',
+                                                            'age',
+                                                            'race_code',
+                                                            'sex_code',
+                                                         'ethnic_code'))
+```
+
+```{r, echo=FALSE, message=FALSE}
+m1_df <- df %>% dplyr::group_by(county_desc, race_code, ethnic_code, sex_code, age) %>%
+              dplyr::summarise(num_voters = sum(total_voters),
+                               num_census = mean(census_total)) %>%
+  ungroup()
+
+below_df <- m1_df %>%
+  filter(num_voters <= num_census) %>%
+  mutate(total_census = round(num_census * 1.057)) %>%
+  select(-c(num_census))
+
+above_df <- m1_df %>%
+  filter(num_voters > num_census) %>%
+  filter(num_census != 0) %>%
+  mutate(total_census = round(num_census * 1.25)) %>%
+  select(-c(num_census)) %>%
+  filter(num_voters <= total_census)
+
+df_clean <- rbind(below_df, above_df) 
+```
+
+```{r}
+df_clean$county_desc <- as.factor(df_clean$county_desc)
+#df_clean$party_cd <- as.factor(df_clean$party_cd)
+df_clean$race_code <- as.factor(df_clean$race_code)
+df_clean$sex_code <- as.factor(df_clean$sex_code)
+df_clean$age <- as.factor(df_clean$age)
+df_clean$ethnic_code <- as.factor(df_clean$ethnic_code)
+```
+
+## Model 1
+
+
+```{r, warning=FALSE}
+mod1 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + (1|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod1)
+```
+
+```{r, warning=FALSE}
+post1 <- posterior_samples(mod1)
+plot(mod1, N = 4)
+```
+
+## Model 2
+
+```{r, warning=FALSE}
+mod2 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + ethnic_code + (1|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod2)
+```
+
+```{r, warning=FALSE}
+post2 <- posterior_samples(mod2)
+plot(mod2, N = 4)
+```
+
+## Model 3
+
+```{r, warning=FALSE}
+mod3 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + ethnic_code + (1 + sex_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod3)
+```
+
+```{r, warning=FALSE}
+post3 <- posterior_samples(mod3)
+plot(mod3, N = 4)
+```
+
+## Model 4
+
+```{r, warning=FALSE}
+mod4 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + ethnic_code + race_code + (1 + sex_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod4)
+```
+
+## Model 5
+
+```{r, warning=FALSE}
+mod5 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + race_code + (1 + sex_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod5)
+```
+
+## Model 6
+
+```{r, warning=FALSE}
+mod6 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age + sex_code + race_code + ethnic_code + (1 + race_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+summary(mod6)
+```
+
+## Models 7 - 9
+
+```{r, warning=FALSE}
+mod7 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + sex_code, 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(normal(0, 10), class = b)), 
+           iter = 2500, warmup = 500, cores = 2, chains = 2, seed = 123)
+
+mod8 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + age, 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(normal(0, 10), class = b)), 
+           iter = 2500, warmup = 500, cores = 2, chains = 2, seed = 123)
+
+mod9 <-brm(data = df_clean, family = binomial, 
+           num_voters | trials(total_census) ~ 1 + county_desc, 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(normal(0, 10), class = b)), 
+           iter = 2500, warmup = 500, cores = 2, chains = 2, seed = 123)
+```
+
+## Model II
+
+```{r}
+new_df <- df %>% 
+  pivot_wider(names_from = party_cd, values_from = total_voters)
+
+new_df[is.na(new_df)] <- 0
+new_df2 <- new_df %>%
+  mutate(new_voter = DEM + REP + UNA) 
+
+below_df2 <- new_df2 %>%
+  filter(new_voter <= census_total) %>%
+  mutate(total_census = round(census_total * 1.057)) %>%
+  select(-c(census_total))
+
+above_df2 <- new_df2 %>%
+  filter(new_voter > census_total) %>%
+  filter(census_total != 0) %>%
+  mutate(total_census = round(census_total * 1.25)) %>%
+  select(-c(census_total)) %>%
+  filter(new_voter <= total_census)
+
+df_clean2 <- rbind(below_df2, above_df2) %>%
+  select(-c(new_voter))
+
+df_pol <- df_clean2 %>%
+  mutate(n_dem = total_census - (REP + UNA),
+         n_rep = total_census - (DEM + UNA),
+         n_una = total_census - (REP + DEM)) %>%
+  select(-c(total_census))
+
+df_dem <- df_pol %>% select(-c(REP, UNA, n_rep, n_una))
+df_rep <- df_pol %>% select(-c(DEM, UNA, n_dem, n_una))
+df_una <- df_pol %>% select(-c(DEM, REP, n_dem, n_rep))
+```
+
+```{r, echo=FALSE, warning=FALSE}
+mod_dem <-brm(data = df_dem, family = binomial, 
+           DEM | trials(n_dem) ~ 1 + age + sex_code + race_code + ethnic_code + (1 + race_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+mod_rep <-brm(data = df_rep, family = binomial, 
+           REP | trials(n_rep) ~ 1 + age + sex_code + race_code + ethnic_code + (1 + race_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+
+mod_una <-brm(data = df_una, family = binomial, 
+           UNA | trials(n_una) ~ 1 + age + sex_code + race_code + ethnic_code + (1 + race_code|county_desc), 
+           prior = c(prior(normal(0, 10), class = Intercept), 
+                     prior(cauchy(0, 1), class = sd), 
+                     prior(normal(0, 10), class = b),
+                     prior(lkj(2), class = cor)), 
+           iter = 4500, warmup = 500, cores = 2, chains = 2, seed = 123)
+```
+
+
+```{r, warning=FALSE}
+# library(broom.mixed)
+# tidy(mod1) %>% mutate_if(is.numeric, round, digits = 2) 
+```
+
+
+```{r, warning=FALSE}
+# mod1 %>%
+#   spread_draws(b_Intercept, r_county_desc[county_desc,]) %>%
+#   median_qi(county_mean = b_Intercept + r_county_desc) %>%
+#   ggplot(aes(y = county_desc, x = county_mean, xmin = .lower, xmax = .upper)) +
+#   geom_pointintervalh() +
+#   theme(plot.title = element_text(hjust = 0.5),
+#         axis.text.y = element_text(size = 6)) +
+#   labs(title = "County Specific Means with 95% Credible Interval",
+#        y = "County",
+#        x = "County Mean")
+# 
+# mod2 %>%
+#   spread_draws(b_Intercept, r_county_desc[county_desc,]) %>%
+#   median_qi(county_mean = b_Intercept + r_county_desc) %>%
+#   ggplot(aes(y = county_desc, x = county_mean, xmin = .lower, xmax = .upper)) +
+#   geom_pointintervalh() +
+#   theme(plot.title = element_text(hjust = 0.5),
+#         axis.text.y = element_text(size = 6)) +
+#   labs(title = "County Specific Means with 95% Credible Interval",
+#        y = "County",
+#        x = "County Mean")
+# 
+# mod3 %>%
+#   spread_draws(b_Intercept, r_county_desc[county_desc,]) %>%
+#   median_qi(county_mean = b_Intercept + r_county_desc) %>%
+#   ggplot(aes(y = county_desc, x = county_mean, xmin = .lower, xmax = .upper)) +
+#   geom_pointintervalh() +
+#   theme(plot.title = element_text(hjust = 0.5),
+#         axis.text.y = element_text(size = 6)) +
+#   labs(title = "County Specific Means with 95% Credible Interval",
+#        y = "County",
+#        x = "County Mean")
+```
+
+```{r}
+# rbind(coef(mod6)$county_desc[, , 1],
+#       coef(mod6)$county_desc[, , 2]) %>% 
+#   as_tibble() %>% 
+#   mutate(param   = c(paste("Intercept", 1:30), paste("male", 1:30)),
+#          reorder = c(30:1, 60:31)) %>%
+#   ggplot(aes(x = reorder(param, reorder))) +
+#   geom_hline(yintercept = 0, linetype = 3, color = "#8B9DAF") +
+#   geom_pointrange(aes(ymin = Q2.5, ymax = Q97.5, y = Estimate, color = reorder < 31),
+#                   shape = 20, size = 3/4) +
+#   scale_color_manual(values = c("#394165", "#A65141")) +
+#   xlab(NULL) +
+#   coord_flip() +
+#   theme(legend.position = "none",
+#         axis.ticks.y    = element_blank(),
+#         axis.text.y     = element_text(hjust = 0))
+```
+
+```{r}
+plot(mod6, N = 4)
+```
+
+
+
+
+
+
+
+***
+
