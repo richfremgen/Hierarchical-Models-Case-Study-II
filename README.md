@@ -1,7 +1,7 @@
 # Hierarchical-Models-Case-Study-II
 Using a Bayesian Hierarchical Model to analyze North Carolina voter registration data
 
-## Analysis
+## Analysis:
 
 ### Introduction
 You have been contracted by a political campaign to analyze voter registration data in North Carolina. The North Carolina State Board of Elections (NCSBE) is the agency charged with the administration of the elections process and campaign finance disclosure and compliance. Among other things, they provide voter registration and turnout data online. The Census Bureau is the principal agency of the U.S. Federal Statistical System, responsible for compiling and disseminating data about the American peopple. Their data is available online here. Using the NC voter files for the general 2016 election, as well as the census reports for NC in 2010, you will attempt to estimate how different demographic groups registered to vote in 2016.
@@ -23,7 +23,7 @@ The dataset `voter_stats_20161108.txt` contains information about the aggregate 
 
 You will need to use both of these to adequately answer the questions of interest. Whether or how you choose to merge the datasets is up to you. Moreover, the entire dataset is too large to conveniently work with. You will only work with a subset of the overall data. Take a random sample of 30 counties out of all the counties in both datasets. You should indicate the counties you sampled in your final report.
 
-## Questions of interest
+## Questions of interest:
 
 Your job is to use a Bayesian hierarchical model to answer the following questions of interest. 
 
